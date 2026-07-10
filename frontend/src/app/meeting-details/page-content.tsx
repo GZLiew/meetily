@@ -16,6 +16,7 @@ import { useSummaryGeneration } from '@/hooks/meeting-details/useSummaryGenerati
 import { useTemplates } from '@/hooks/meeting-details/useTemplates';
 import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
 import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperations';
+import { useSummaryExport } from '@/hooks/meeting-details/useSummaryExport';
 import { useConfig } from '@/contexts/ConfigContext';
 
 export default function PageContent({
@@ -71,6 +72,15 @@ export default function PageContent({
   const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
   const templates = useTemplates();
 
+  // Summary export (writes summary.md into the meeting folder, next to the transcript).
+  // Declared before summary generation so it can auto-export freshly generated summaries.
+  const summaryExport = useSummaryExport({
+    meeting,
+    meetingTitle: meetingData.meetingTitle,
+    aiSummary: meetingData.aiSummary,
+    blockNoteSummaryRef: meetingData.blockNoteSummaryRef,
+  });
+
   // Callback to register the modal open function
   const handleRegisterModalOpen = (openFn: () => void) => {
     console.log('📝 Registering modal open function in PageContent');
@@ -120,6 +130,9 @@ export default function PageContent({
     updateMeetingTitle: meetingData.updateMeetingTitle,
     setAiSummary: meetingData.setAiSummary,
     onOpenModelSettings: handleOpenModelSettings,
+    onSummaryGenerated: (markdownBody) => {
+      void summaryExport.exportSummaryFromMarkdown(markdownBody, { silent: true });
+    },
   });
 
   const copyOperations = useCopyOperations({
@@ -204,6 +217,7 @@ export default function PageContent({
           isSaving={meetingData.isSaving}
           onSaveAll={meetingData.saveAllChanges}
           onCopySummary={copyOperations.handleCopySummary}
+          onExportSummary={summaryExport.handleExportSummary}
           onOpenFolder={meetingOperations.handleOpenMeetingFolder}
           aiSummary={meetingData.aiSummary}
           summaryStatus={summaryGeneration.summaryStatus}

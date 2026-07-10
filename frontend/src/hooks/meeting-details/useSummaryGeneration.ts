@@ -12,6 +12,7 @@ import {
   readMeetingSummaryLanguage,
   readCachedDetectedSummaryLanguage,
 } from '@/lib/summary-language-preferences';
+import { legacySummaryToMarkdown } from '@/lib/summary-markdown';
 
 async function resolveSummaryLanguage(
   meetingId: string,
@@ -60,6 +61,8 @@ interface UseSummaryGenerationProps {
   updateMeetingTitle: (title: string) => void;
   setAiSummary: (summary: Summary | null) => void;
   onOpenModelSettings?: () => void;
+  /** Called with the generated summary as markdown once generation completes successfully. */
+  onSummaryGenerated?: (markdownBody: string) => void | Promise<void>;
 }
 
 export function useSummaryGeneration({
@@ -72,6 +75,7 @@ export function useSummaryGeneration({
   updateMeetingTitle,
   setAiSummary,
   onOpenModelSettings,
+  onSummaryGenerated,
 }: UseSummaryGenerationProps) {
   const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>('idle');
   const [summaryError, setSummaryError] = useState<string | null>(null);
@@ -277,6 +281,9 @@ export function useSummaryGeneration({
             setAiSummary({ markdown: pollingResult.data.markdown } as any);
             setSummaryStatus('completed');
 
+            // Auto-export the freshly generated summary as summary.md next to the transcript.
+            void onSummaryGenerated?.(pollingResult.data.markdown);
+
             // Show success toast
             toast.success('Summary generated successfully!', {
               description: 'Your meeting summary is ready',
@@ -351,6 +358,9 @@ export function useSummaryGeneration({
           setAiSummary(formattedSummary);
           setSummaryStatus('completed');
 
+          // Auto-export the freshly generated summary as summary.md next to the transcript.
+          void onSummaryGenerated?.(legacySummaryToMarkdown(formattedSummary));
+
           // Show success toast
           toast.success('Summary generated successfully!', {
             description: 'Your meeting summary is ready',
@@ -396,6 +406,7 @@ export function useSummaryGeneration({
     setAiSummary,
     updateMeetingTitle,
     onMeetingUpdated,
+    onSummaryGenerated,
   ]);
 
   // Helper function to fetch ALL transcripts for summary generation

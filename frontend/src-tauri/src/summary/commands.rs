@@ -107,6 +107,40 @@ pub async fn api_save_meeting_summary<R: Runtime>(
     }
 }
 
+/// Exports a meeting summary as `summary.md` into the meeting's recording folder
+/// (the same folder that holds `transcripts.json`), so the summary lives next to the transcript.
+///
+/// The `markdown` argument is written verbatim; the caller assembles the document
+/// (title + metadata + body). Returns the absolute path of the written file, and errors
+/// if the meeting has no recording folder to write into.
+#[tauri::command]
+pub async fn api_export_meeting_summary_markdown<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    markdown: String,
+) -> Result<String, String> {
+    log_info!(
+        "api_export_meeting_summary_markdown called for meeting_id: {}",
+        meeting_id
+    );
+
+    match resolve_meeting_folder(state.db_manager.pool(), &meeting_id).await? {
+        MeetingFolderResolution::Folder(folder) => {
+            let path = write_summary_markdown_file(&folder, &markdown).map_err(|e| {
+                log_error!("Failed to write summary.md for {}: {}", meeting_id, e);
+                format!("Failed to write summary file: {}", e)
+            })?;
+            log_info!("Summary exported to {} for meeting_id: {}", path, meeting_id);
+            Ok(path)
+        }
+        MeetingFolderResolution::NoFolder => Err(
+            "This meeting has no recording folder, so the summary can't be saved next to the transcript."
+                .to_string(),
+        ),
+    }
+}
+
 /// Gets the per-meeting summary language override from metadata.json.
 #[tauri::command]
 pub async fn api_get_meeting_summary_language<R: Runtime>(
@@ -221,6 +255,20 @@ async fn resolve_meeting_folder(
     };
 
     Ok(MeetingFolderResolution::Folder(PathBuf::from(folder_path)))
+}
+
+/// Writes `summary.md` into the given meeting folder using an atomic temp-file + rename,
+/// mirroring how `transcripts.json` is persisted. Returns the absolute path of the file.
+fn write_summary_markdown_file(folder: &PathBuf, markdown: &str) -> std::io::Result<String> {
+    std::fs::create_dir_all(folder)?;
+
+    let summary_path = folder.join("summary.md");
+    let temp_path = folder.join(".summary.md.tmp");
+
+    std::fs::write(&temp_path, markdown)?;
+    std::fs::rename(&temp_path, &summary_path)?;
+
+    Ok(summary_path.to_string_lossy().into_owned())
 }
 
 /// Gets summary status and data (Native SQLx implementation)

@@ -661,6 +661,7 @@ pub fn run() {
             summary::commands::api_process_transcript,
             summary::commands::api_get_summary,
             summary::commands::api_save_meeting_summary,
+            summary::commands::api_export_meeting_summary_markdown,
             summary::commands::api_get_meeting_summary_language,
             summary::commands::api_save_meeting_summary_language,
             summary::commands::api_get_meeting_detected_summary_language,
