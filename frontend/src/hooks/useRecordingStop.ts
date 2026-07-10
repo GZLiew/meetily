@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { useTranscripts } from '@/contexts/TranscriptContext';
+import { LIVE_SUMMARY_STORAGE_KEY } from '@/hooks/useLiveSummary';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { storageService } from '@/services/storageService';
@@ -293,6 +295,24 @@ export function useRecordingStop(
           console.log('   Transcripts:', freshTranscripts.length);
           console.log('   folder_path:', folderPath);
 
+          // Pre-fill the meeting's summary with the last live rolling summary (if any),
+          // so meeting-details shows it as an editable draft instead of auto-generating.
+          const liveSummaryMarkdown = sessionStorage.getItem(LIVE_SUMMARY_STORAGE_KEY);
+          const hasLiveSummary = !!liveSummaryMarkdown?.trim();
+          if (hasLiveSummary) {
+            try {
+              await invoke('api_prefill_meeting_summary', {
+                meetingId,
+                transcript: freshTranscripts.map(t => t.text).join(' '),
+                summary: { markdown: liveSummaryMarkdown },
+              });
+              console.log('✅ Pre-filled meeting summary from live rolling summary');
+            } catch (error) {
+              console.error('Failed to pre-fill meeting summary:', error);
+            }
+          }
+          sessionStorage.removeItem(LIVE_SUMMARY_STORAGE_KEY);
+
           // Mark meeting as saved in IndexedDB (for recovery system)
           await markMeetingAsSaved();
 
@@ -335,9 +355,12 @@ export function useRecordingStop(
             duration: 10000,
           });
 
-          // Auto-navigate after a short delay with source parameter
+          // Auto-navigate after a short delay. When a live summary pre-filled the
+          // meeting, use a non-"recording" source so meeting-details does NOT
+          // auto-generate over the draft (see the source gate in meeting-details/page.tsx).
           setTimeout(() => {
-            router.push(`/meeting-details?id=${meetingId}&source=recording`);
+            const source = hasLiveSummary ? 'recording-prefilled' : 'recording';
+            router.push(`/meeting-details?id=${meetingId}&source=${source}`);
             clearTranscripts()
             Analytics.trackPageView('meeting_details');
 

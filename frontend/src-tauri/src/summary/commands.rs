@@ -1,5 +1,5 @@
 use crate::database::repositories::{
-    meeting::MeetingsRepository,
+    meeting::MeetingsRepository, setting::SettingsRepository,
     summary::SummaryProcessesRepository, transcript_chunk::TranscriptChunksRepository,
 };
 use crate::state::AppState;
@@ -11,10 +11,13 @@ use crate::summary::language_detection::{
     detect_summary_language, SummaryLanguageDetection,
 };
 use crate::summary::service::SummaryService;
+use crate::summary::clean_llm_markdown_output;
+use crate::summary::llm_client::{generate_summary, LLMProvider};
 use log::{error as log_error, info as log_info, warn as log_warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::{AppHandle, Runtime};
+use std::time::Duration;
+use tauri::{AppHandle, Manager, Runtime};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SummaryResponse {
@@ -489,4 +492,153 @@ pub async fn api_cancel_summary<R: Runtime>(
             "meeting_id": meeting_id,
         }))
     }
+}
+
+/// Sentinel returned when the configured summary model is not a local model
+/// (Ollama or built-in AI). The frontend matches this string to show a hint
+/// instead of an error, since the live rolling summary is intentionally local-only.
+const LIVE_SUMMARY_LOCAL_ONLY: &str = "LIVE_SUMMARY_LOCAL_ONLY";
+
+/// Most-recent characters of transcript sent per live-summary call. Bounds the
+/// local model's context window and latency (~16k chars ≈ ~5.6k tokens).
+const LIVE_SUMMARY_MAX_CHARS: usize = 16_000;
+
+/// Per-call wall-clock budget — shorter than generate_summary's internal 300s so
+/// a slow tick cannot pile up behind the ~60s regeneration cadence.
+const LIVE_SUMMARY_TIMEOUT_SECS: u64 = 45;
+
+/// System prompt for the ephemeral live rolling summary shown during recording.
+const LIVE_SUMMARY_SYSTEM_PROMPT: &str = "You are a real-time meeting assistant. You are given the running transcript of a meeting that is still in progress. Summarize what has been discussed SO FAR as a short, skimmable Markdown bullet list.\n\nRules:\n- Output ONLY Markdown bullet points (each top-level line starting with \"- \"). No title, no headings, no preamble, and no closing remarks.\n- Capture the key discussion points, decisions made, and action items mentioned so far.\n- Aim for 3-8 concise bullets. Use indented sub-bullets sparingly to group related detail.\n- The transcript is live and may end mid-sentence. Summarize only what is clearly stated; do not speculate about what will be said next.\n- Write in English regardless of the transcript language.\n- If there is not enough content to summarize yet, output exactly: \"- Not enough has been discussed yet.\"";
+
+/// Generates an ephemeral "rolling" bullet-point summary from the running
+/// transcript during an active recording. One-shot LLM call; nothing is persisted.
+///
+/// Local-only: if the configured summary model is not Ollama or built-in AI (or
+/// no model is configured), returns the `LIVE_SUMMARY_LOCAL_ONLY` sentinel and
+/// makes no call. Returns cleaned Markdown bullets, or an empty string when the
+/// transcript is empty.
+#[tauri::command]
+pub async fn generate_live_summary<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    transcript: String,
+) -> Result<String, String> {
+    let pool = state.db_manager.pool();
+
+    // Load the configured summary model; a missing row means it isn't set up yet.
+    let setting = match SettingsRepository::get_model_config(pool).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return Err(LIVE_SUMMARY_LOCAL_ONLY.to_string()),
+        Err(e) => return Err(format!("Failed to load model config: {}", e)),
+    };
+
+    let provider = LLMProvider::from_str(setting.provider.trim())
+        .map_err(|_| LIVE_SUMMARY_LOCAL_ONLY.to_string())?;
+
+    // Local-only per product decision: refuse cloud providers without calling them.
+    if provider != LLMProvider::Ollama && provider != LLMProvider::BuiltInAI {
+        return Err(LIVE_SUMMARY_LOCAL_ONLY.to_string());
+    }
+
+    let model_name = setting.model.trim().to_string();
+    if model_name.is_empty() {
+        return Err(LIVE_SUMMARY_LOCAL_ONLY.to_string());
+    }
+
+    // Cap to the most recent characters (protects local context + latency).
+    let trimmed = transcript.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    let char_count = trimmed.chars().count();
+    let capped: String = if char_count > LIVE_SUMMARY_MAX_CHARS {
+        trimmed
+            .chars()
+            .skip(char_count - LIVE_SUMMARY_MAX_CHARS)
+            .collect()
+    } else {
+        trimmed.to_string()
+    };
+
+    let user_prompt = format!(
+        "Summarize the meeting so far as Markdown bullet points.\n\n<transcript>\n{}\n</transcript>",
+        capped
+    );
+
+    // The built-in AI sidecar needs the app data dir (service.rs pattern).
+    let app_data_dir = app.path().app_data_dir().ok();
+    let ollama_endpoint = setting.ollama_endpoint.clone();
+
+    let client = reqwest::Client::new();
+    let call = generate_summary(
+        &client,
+        &provider,
+        &model_name,
+        "", // local providers need no api key
+        LIVE_SUMMARY_SYSTEM_PROMPT,
+        &user_prompt,
+        ollama_endpoint.as_deref(),
+        None, // custom_openai_endpoint (cloud-only, unreachable here)
+        None, // max_tokens
+        None, // temperature
+        None, // top_p
+        app_data_dir.as_ref(),
+        None, // cancellation handled by tokio::time::timeout below
+    );
+
+    match tokio::time::timeout(Duration::from_secs(LIVE_SUMMARY_TIMEOUT_SECS), call).await {
+        Ok(Ok(raw)) => Ok(clean_llm_markdown_output(&raw)),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("Live summary timed out".to_string()),
+    }
+}
+
+/// Persists a live rolling summary as the meeting's summary right after a
+/// recording is saved, so meeting-details shows it as an editable starting draft.
+///
+/// Mirrors exactly what the normal generation flow writes — a `transcript_chunks`
+/// row (so `api_get_summary`'s JOIN succeeds and a later Regenerate has its data)
+/// plus a `completed` `summary_processes` row — but skips the LLM entirely and
+/// stores the pre-computed `summary` markdown produced live during recording.
+#[tauri::command]
+pub async fn api_prefill_meeting_summary<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    transcript: String,
+    summary: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    log_info!(
+        "api_prefill_meeting_summary called for meeting_id: {}",
+        meeting_id
+    );
+    let pool = state.db_manager.pool();
+
+    // Ensure a transcript_chunks row exists so api_get_summary's JOIN returns the
+    // summary (and a later Regenerate finds the transcript data it expects).
+    TranscriptChunksRepository::save_transcript_data(
+        pool,
+        &meeting_id,
+        &transcript,
+        "live-summary",
+        "live-summary",
+        40000,
+        1000,
+    )
+    .await
+    .map_err(|e| format!("Failed to save transcript chunks: {}", e))?;
+
+    // Create the process row, then mark it completed with the live summary markdown.
+    SummaryProcessesRepository::create_or_reset_process(pool, &meeting_id)
+        .await
+        .map_err(|e| format!("Failed to initialize summary process: {}", e))?;
+    SummaryProcessesRepository::update_process_completed(pool, &meeting_id, summary, 0, 0.0)
+        .await
+        .map_err(|e| format!("Failed to save prefilled summary: {}", e))?;
+
+    log_info!(
+        "Prefilled meeting summary from live rolling summary for meeting_id: {}",
+        meeting_id
+    );
+    Ok(serde_json::json!({ "message": "Meeting summary prefilled" }))
 }

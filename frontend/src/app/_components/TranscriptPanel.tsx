@@ -23,12 +23,15 @@ interface TranscriptPanelProps {
   isProcessingStop: boolean;
   isStopping: boolean;
   showModal: (name: ModalType, message?: string) => void;
+  // When true, narrow the panel so the LiveSummaryPanel can share the row.
+  isSplit?: boolean;
 }
 
 export function TranscriptPanel({
   isProcessingStop,
   isStopping,
-  showModal
+  showModal,
+  isSplit = false
 }: TranscriptPanelProps) {
   // Contexts
   const { transcripts, transcriptContainerRef, copyTranscript } = useTranscripts();
@@ -50,7 +53,7 @@ export function TranscriptPanel({
   );
 
   return (
-    <div ref={transcriptContainerRef} className="w-full border-r border-border bg-card flex flex-col overflow-y-auto">
+    <div ref={transcriptContainerRef} className={`${isSplit ? 'w-full md:w-3/5 lg:w-2/3' : 'w-full'} border-r border-border bg-card flex flex-col overflow-y-auto`}>
       {/* Title area - Sticky header */}
       <div className="sticky top-0 z-10 bg-card p-4 border-border">
         <div className="flex flex-col space-y-3">
