@@ -37,6 +37,15 @@ interface SidebarItem {
   title: string;
   type: 'folder' | 'file';
   children?: SidebarItem[];
+  createdAt?: string;
+}
+
+// Compact date shown under each meeting in the sidebar, e.g. "Jul 9, 2025".
+function formatMeetingDate(iso?: string): string {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 const Sidebar: React.FC = () => {
@@ -641,6 +650,12 @@ const Sidebar: React.FC = () => {
                   </div>
                 )}
               </div>
+
+              {isMeetingItem && item.createdAt && (
+                <span className="ml-8 mt-0.5 text-xs text-muted-foreground">
+                  {formatMeetingDate(item.createdAt)}
+                </span>
+              )}
 
               {/* Show transcript match snippet if available */}
               {hasTranscriptMatch && (
