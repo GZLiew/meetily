@@ -82,6 +82,29 @@ impl TranscriptsRepository {
         Ok(meeting_id)
     }
 
+    /// Updates the text of a single transcript segment by its primary key.
+    /// The `transcripts` table has no `updated_at` column, so only `transcript` is set.
+    /// Returns Ok(false) if no row matched the given id.
+    pub async fn update_transcript_text(
+        pool: &SqlitePool,
+        transcript_id: &str,
+        new_text: &str,
+    ) -> Result<bool, SqlxError> {
+        if transcript_id.trim().is_empty() {
+            return Err(SqlxError::Protocol(
+                "transcript_id cannot be empty".to_string(),
+            ));
+        }
+
+        let result = sqlx::query("UPDATE transcripts SET transcript = ? WHERE id = ?")
+            .bind(new_text)
+            .bind(transcript_id)
+            .execute(pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Searches for a query string within the transcripts.
     /// It returns a list of matching transcripts with context.
     pub async fn search_transcripts(

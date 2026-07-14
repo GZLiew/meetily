@@ -220,11 +220,12 @@ fn get_transcription_status() -> TranscriptionStatus {
 }
 
 #[tauri::command]
-fn read_audio_file(file_path: String) -> Result<Vec<u8>, String> {
-    match std::fs::read(&file_path) {
-        Ok(data) => Ok(data),
-        Err(e) => Err(format!("Failed to read audio file: {}", e)),
-    }
+fn read_audio_file(file_path: String) -> Result<tauri::ipc::Response, String> {
+    // Return raw bytes as an ArrayBuffer on the JS side. Returning Vec<u8> would be
+    // serialized as a JSON number array (hundreds of MB for an hour-long recording).
+    std::fs::read(&file_path)
+        .map(tauri::ipc::Response::new)
+        .map_err(|e| format!("Failed to read audio file: {}", e))
 }
 
 #[tauri::command]
@@ -648,6 +649,7 @@ pub fn run() {
             api::api_get_meeting_metadata,
             api::api_get_meeting_transcripts,
             api::api_save_meeting_title,
+            api::api_update_transcript_segment,
             api::api_save_transcript,
             api::open_meeting_folder,
             api::test_backend_connection,

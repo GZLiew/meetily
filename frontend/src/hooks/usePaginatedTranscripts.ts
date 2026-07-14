@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import { Transcript, MeetingMetadata, PaginatedTranscriptsResponse, TranscriptSegmentData } from "@/types";
 
 const DEFAULT_PAGE_SIZE = 100;
@@ -25,6 +26,7 @@ interface UsePaginatedTranscriptsReturn {
     loadMore: () => Promise<void>;
     reset: () => void;
     refetch: () => Promise<void>;
+    updateSegment: (id: string, newText: string) => Promise<void>;
 }
 
 /**
@@ -166,6 +168,26 @@ export function usePaginatedTranscripts({
         }
     }, [meetingId, reset, loadMetadata, loadTranscriptsAtOffset]);
 
+    // Optimistically update a single transcript segment's text, then persist to the DB.
+    const updateSegment = useCallback(async (id: string, newText: string) => {
+        let prevText: string | undefined;
+        setTranscripts(prev => prev.map(t => {
+            if (t.id === id) { prevText = t.text; return { ...t, text: newText }; }
+            return t;
+        }));
+
+        try {
+            await invoke('api_update_transcript_segment', { transcriptId: id, text: newText });
+            toast.success('Transcript updated');
+        } catch (err) {
+            console.error('Failed to update transcript segment:', err);
+            if (prevText !== undefined) {
+                setTranscripts(prev => prev.map(t => (t.id === id ? { ...t, text: prevText! } : t)));
+            }
+            toast.error('Failed to update transcript');
+        }
+    }, []);
+
     // Initial load
     useEffect(() => {
         if (!meetingId) {
@@ -211,5 +233,6 @@ export function usePaginatedTranscripts({
         loadMore,
         reset,
         refetch,
+        updateSegment,
     };
 }

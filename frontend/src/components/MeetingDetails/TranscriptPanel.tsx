@@ -4,7 +4,9 @@ import { Transcript, TranscriptSegmentData } from '@/types';
 import { TranscriptView } from '@/components/TranscriptView';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
-import { useMemo } from 'react';
+import { AudioPlayerBar } from './AudioPlayerBar';
+import { useMeetingAudioPlayer } from '@/hooks/useMeetingAudioPlayer';
+import { useCallback, useMemo } from 'react';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -28,6 +30,9 @@ interface TranscriptPanelProps {
   meetingId?: string;
   meetingFolderPath?: string | null;
   onRefetchTranscripts?: () => Promise<void>;
+
+  /** Persist an edited transcript block's raw text (meeting-details inline editor). */
+  onEditSave?: (id: string, newText: string) => void;
 }
 
 export function TranscriptPanel({
@@ -48,6 +53,7 @@ export function TranscriptPanel({
   meetingId,
   meetingFolderPath,
   onRefetchTranscripts,
+  onEditSave,
 }: TranscriptPanelProps) {
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
@@ -64,6 +70,32 @@ export function TranscriptPanel({
     }));
   }, [transcripts, usePagination, segments]);
 
+  // Audio playback for the saved recording. Hidden/no-op when the meeting has no
+  // audio file (auto-save was off, or a non-mp4 import) — read failure → hasAudio=false.
+  const audioPath = useMemo(
+    () => (meetingFolderPath ? `${meetingFolderPath}/audio.mp4` : null),
+    [meetingFolderPath]
+  );
+  const {
+    isPlaying,
+    currentTime,
+    duration,
+    hasAudio,
+    isLoading: isAudioLoading,
+    error: audioError,
+    play,
+    toggle,
+    seek,
+  } = useMeetingAudioPlayer(audioPath);
+
+  const handleSeekTo = useCallback(
+    (seconds: number) => {
+      seek(seconds);
+      play(); // seek + play, per the click-a-block behavior
+    },
+    [seek, play]
+  );
+
   return (
     <div className="hidden md:flex md:w-1/4 lg:w-1/3 min-w-0 border-r border-border bg-card flex-col relative shrink-0">
       {/* Title area */}
@@ -76,6 +108,24 @@ export function TranscriptPanel({
           meetingFolderPath={meetingFolderPath}
           onRefetchTranscripts={onRefetchTranscripts}
         />
+        {hasAudio ? (
+          <AudioPlayerBar
+            isPlaying={isPlaying}
+            currentTime={currentTime}
+            duration={duration}
+            onToggle={toggle}
+            onSeek={seek}
+          />
+        ) : isAudioLoading ? (
+          <div className="mt-3 flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
+            <div className="h-3 w-3 animate-spin rounded-full border-2 border-muted border-t-muted-foreground" />
+            Loading audio…
+          </div>
+        ) : audioError ? (
+          <div className="mt-3 rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
+            Couldn&apos;t load this recording&apos;s audio.
+          </div>
+        ) : null}
       </div>
 
       {/* Transcript content - use virtualized view for better performance */}
@@ -94,6 +144,9 @@ export function TranscriptPanel({
           totalCount={totalCount}
           loadedCount={loadedCount}
           onLoadMore={onLoadMore}
+          onSeekTo={hasAudio ? handleSeekTo : undefined}
+          currentTime={hasAudio ? currentTime : undefined}
+          onEditSave={onEditSave}
         />
       </div>
 

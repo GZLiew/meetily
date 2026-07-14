@@ -928,6 +928,33 @@ pub async fn api_save_meeting_title<R: Runtime>(
     }
 }
 
+/// Updates the text of a single transcript segment (block) by its id.
+/// Used by the meeting-details inline transcript editor.
+#[tauri::command]
+pub async fn api_update_transcript_segment<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    transcript_id: String,
+    text: String,
+) -> Result<serde_json::Value, String> {
+    log_info!(
+        "api_update_transcript_segment called for transcript_id: {}",
+        transcript_id
+    );
+    let pool = state.db_manager.pool();
+    match TranscriptsRepository::update_transcript_text(pool, &transcript_id, &text).await {
+        Ok(true) => Ok(serde_json::json!({"message": "Transcript segment updated"})),
+        Ok(false) => {
+            log_error!("No transcript found with id {}", transcript_id);
+            Err(format!("No transcript found with id {}", transcript_id))
+        }
+        Err(e) => {
+            log_error!("Failed to update transcript segment {}: {}", transcript_id, e);
+            Err(format!("Failed to update transcript segment: {}", e))
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn api_save_transcript<R: Runtime>(
     _app: AppHandle<R>,

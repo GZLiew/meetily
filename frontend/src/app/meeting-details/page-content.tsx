@@ -33,6 +33,7 @@ export default function PageContent({
   totalCount,
   loadedCount,
   onLoadMore,
+  onEditSave,
 }: {
   meeting: any;
   summaryData: Summary | null;
@@ -47,6 +48,7 @@ export default function PageContent({
   totalCount?: number;
   loadedCount?: number;
   onLoadMore?: () => void;
+  onEditSave?: (id: string, newText: string) => void;
 }) {
   console.log('📄 PAGE CONTENT: Initializing with data:', {
     meetingId: meeting.id,
@@ -204,6 +206,7 @@ export default function PageContent({
           meetingId={meeting.id}
           meetingFolderPath={meeting.folder_path}
           onRefetchTranscripts={onRefetchTranscripts}
+          onEditSave={onEditSave}
         />
         <SummaryPanel
           meeting={meeting}
