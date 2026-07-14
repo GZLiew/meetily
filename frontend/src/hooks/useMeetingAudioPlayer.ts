@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 
 export interface MeetingAudioPlayer {
   isPlaying: boolean;
@@ -15,16 +15,20 @@ export interface MeetingAudioPlayer {
 }
 
 /**
- * Loads a meeting's recorded audio into an HTMLAudioElement via a Blob URL and
- * exposes native play/pause/seek. `audioPath` is an absolute file path
- * (e.g. `${folder_path}/audio.mp4`) or null.
+ * Plays a meeting's recorded audio in the meeting-details view.
  *
- * A read failure (missing file — e.g. auto-save was off, or an imported non-mp4
- * recording) degrades gracefully to `hasAudio = false` rather than surfacing an error.
+ * Given the meeting's recording `folderPath`, it resolves the actual audio file
+ * (audio.mp4, or an imported .m4a/.wav/...) via the `resolve_meeting_audio_path`
+ * command, then loads it into an HTMLAudioElement through Tauri's asset protocol
+ * (`convertFileSrc`). The asset protocol streams with HTTP range support, so it
+ * seeks reliably and — unlike a `blob:` URL — works in the packaged app, not just
+ * `tauri dev`.
+ *
+ * When the meeting has no audio file (auto-save was off), `hasAudio` stays false
+ * and no error is set, so the UI can simply omit the player.
  */
-export function useMeetingAudioPlayer(audioPath: string | null): MeetingAudioPlayer {
+export function useMeetingAudioPlayer(folderPath: string | null): MeetingAudioPlayer {
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const objectUrlRef = useRef<string | null>(null);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -34,33 +38,36 @@ export function useMeetingAudioPlayer(audioPath: string | null): MeetingAudioPla
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Reset for the new path.
+    // Reset for the new meeting.
     setIsPlaying(false);
     setCurrentTime(0);
     setDuration(0);
     setHasAudio(false);
     setError(null);
 
-    if (!audioPath) {
+    if (!folderPath) {
       setIsLoading(false);
       return;
     }
 
     let cancelled = false;
-    const audio = new Audio();
-    audio.preload = 'metadata';
-    audioRef.current = audio;
+    let audioEl: HTMLAudioElement | null = null;
 
     const onLoadedMetadata = () => {
-      if (Number.isFinite(audio.duration)) setDuration(audio.duration);
+      const a = audioRef.current;
+      if (a && Number.isFinite(a.duration)) setDuration(a.duration);
       setHasAudio(true);
     };
-    const onTimeUpdate = () => setCurrentTime(audio.currentTime);
+    const onTimeUpdate = () => {
+      const a = audioRef.current;
+      if (a) setCurrentTime(a.currentTime);
+    };
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
     const onEnded = () => {
+      const a = audioRef.current;
       setIsPlaying(false);
-      setCurrentTime(Number.isFinite(audio.duration) ? audio.duration : 0);
+      setCurrentTime(a && Number.isFinite(a.duration) ? a.duration : 0);
     };
     const onError = () => {
       if (cancelled) return;
@@ -68,54 +75,60 @@ export function useMeetingAudioPlayer(audioPath: string | null): MeetingAudioPla
       setError('Unable to play this audio file');
     };
 
-    audio.addEventListener('loadedmetadata', onLoadedMetadata);
-    audio.addEventListener('timeupdate', onTimeUpdate);
-    audio.addEventListener('play', onPlay);
-    audio.addEventListener('pause', onPause);
-    audio.addEventListener('ended', onEnded);
-    audio.addEventListener('error', onError);
+    const detach = () => {
+      const a = audioEl;
+      if (!a) return;
+      a.pause();
+      a.removeEventListener('loadedmetadata', onLoadedMetadata);
+      a.removeEventListener('timeupdate', onTimeUpdate);
+      a.removeEventListener('play', onPlay);
+      a.removeEventListener('pause', onPause);
+      a.removeEventListener('ended', onEnded);
+      a.removeEventListener('error', onError);
+      a.removeAttribute('src');
+      a.load(); // release the source
+      audioEl = null;
+      audioRef.current = null;
+    };
 
     setIsLoading(true);
     (async () => {
+      let audioPath: string | null = null;
       try {
-        // read_audio_file returns raw bytes (tauri::ipc::Response) → ArrayBuffer here.
-        const buf = await invoke<ArrayBuffer>('read_audio_file', { filePath: audioPath });
-        if (cancelled) return;
-        if (!buf || buf.byteLength === 0) throw new Error('Empty audio data');
-
-        const blob = new Blob([buf], { type: 'audio/mp4' });
-        const url = URL.createObjectURL(blob);
-        objectUrlRef.current = url;
-        audio.src = url; // hasAudio flips true on 'loadedmetadata'
+        audioPath = await invoke<string | null>('resolve_meeting_audio_path', { folderPath });
       } catch (e) {
-        if (cancelled) return;
-        // Missing file (no checkpoints) or non-mp4 import → treat as "no audio".
-        console.warn('No playable audio for meeting:', e);
-        setHasAudio(false);
-        setError(null);
-      } finally {
-        if (!cancelled) setIsLoading(false);
+        console.warn('Failed to resolve meeting audio path:', e);
       }
+      if (cancelled) return;
+
+      if (!audioPath) {
+        // Meeting recorded without audio (auto-save off) — no player, no error.
+        setIsLoading(false);
+        return;
+      }
+
+      const audio = new Audio();
+      audio.preload = 'metadata';
+      audioEl = audio;
+      audioRef.current = audio;
+
+      audio.addEventListener('loadedmetadata', onLoadedMetadata);
+      audio.addEventListener('timeupdate', onTimeUpdate);
+      audio.addEventListener('play', onPlay);
+      audio.addEventListener('pause', onPause);
+      audio.addEventListener('ended', onEnded);
+      audio.addEventListener('error', onError);
+
+      // Asset protocol URL (streams + range-seeks; works in the packaged app).
+      audio.src = convertFileSrc(audioPath);
+      setIsLoading(false);
     })();
 
     return () => {
       cancelled = true;
-      audio.pause();
-      audio.removeEventListener('loadedmetadata', onLoadedMetadata);
-      audio.removeEventListener('timeupdate', onTimeUpdate);
-      audio.removeEventListener('play', onPlay);
-      audio.removeEventListener('pause', onPause);
-      audio.removeEventListener('ended', onEnded);
-      audio.removeEventListener('error', onError);
-      audio.removeAttribute('src');
-      audio.load(); // release the source
-      if (objectUrlRef.current) {
-        URL.revokeObjectURL(objectUrlRef.current);
-        objectUrlRef.current = null;
-      }
-      audioRef.current = null;
+      detach();
     };
-  }, [audioPath]);
+  }, [folderPath]);
 
   const play = useCallback(() => {
     audioRef.current?.play().catch((err) => console.warn('audio play() rejected:', err));

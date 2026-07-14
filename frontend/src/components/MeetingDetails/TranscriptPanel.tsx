@@ -70,12 +70,9 @@ export function TranscriptPanel({
     }));
   }, [transcripts, usePagination, segments]);
 
-  // Audio playback for the saved recording. Hidden/no-op when the meeting has no
-  // audio file (auto-save was off, or a non-mp4 import) — read failure → hasAudio=false.
-  const audioPath = useMemo(
-    () => (meetingFolderPath ? `${meetingFolderPath}/audio.mp4` : null),
-    [meetingFolderPath]
-  );
+  // Audio playback for the saved recording. The hook resolves the actual audio file
+  // in the meeting folder and streams it via the asset protocol; when the meeting has
+  // no audio (auto-save was off), hasAudio stays false and the player is omitted.
   const {
     isPlaying,
     currentTime,
@@ -86,7 +83,7 @@ export function TranscriptPanel({
     play,
     toggle,
     seek,
-  } = useMeetingAudioPlayer(audioPath);
+  } = useMeetingAudioPlayer(meetingFolderPath ?? null);
 
   const handleSeekTo = useCallback(
     (seconds: number) => {

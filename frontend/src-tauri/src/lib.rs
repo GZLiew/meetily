@@ -228,6 +228,22 @@ fn read_audio_file(file_path: String) -> Result<tauri::ipc::Response, String> {
         .map_err(|e| format!("Failed to read audio file: {}", e))
 }
 
+/// Resolves the playable audio file inside a meeting folder (audio.mp4, or an
+/// imported .m4a/.wav/.mp3/... recording), returning its absolute path, or None if
+/// there is none. The meeting-details audio player loads this via the asset protocol
+/// (convertFileSrc), which streams + range-seeks reliably in the packaged app where
+/// blob: URLs do not.
+#[tauri::command]
+fn resolve_meeting_audio_path(folder_path: String) -> Option<String> {
+    let folder = std::path::Path::new(&folder_path);
+    if !folder.is_dir() {
+        return None;
+    }
+    crate::audio::retranscription::find_audio_file(folder)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 async fn save_transcript(file_path: String, content: String) -> Result<(), String> {
     log_info!("Saving transcript to: {}", file_path);
@@ -530,6 +546,7 @@ pub fn run() {
             is_recording,
             get_transcription_status,
             read_audio_file,
+            resolve_meeting_audio_path,
             save_transcript,
             analytics::commands::init_analytics,
             analytics::commands::disable_analytics,
