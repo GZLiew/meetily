@@ -406,8 +406,9 @@ pub fn calculate_buffer_timeout(
     // Calculate base timeout from reported buffer size
     let base = Duration::from_secs_f64(buffer_size as f64 / sample_rate as f64);
 
-    // Add 2x headroom for jitter (Cap's strategy)
-    let with_headroom = base.mul_f32(2.0);
+    // Add 2x headroom for jitter (Cap's strategy).
+    // Integer multiply keeps the duration exact (mul_f32 drifts by ~ns).
+    let with_headroom = base * 2;
 
     // Clamp to device-specific range
     clamp_duration(with_headroom, min_timeout, max_timeout)
@@ -440,8 +441,13 @@ mod tests {
 
     #[test]
     fn test_builtin_mic_detection() {
-        let kind = InputDeviceKind::detect("MacBook Pro Microphone", 0, 0);
-        // Should fall through to Unknown (no Bluetooth pattern, no buffer size)
+        // Name heuristics must not classify a built-in mic; on real hardware
+        // the platform-native transport lookup identifies it as Wired.
+        assert_eq!(InputDeviceKind::detect_by_name("MacBook Pro Microphone"), None);
+
+        // With no matching real device, no name pattern, and no buffer info,
+        // full detection falls through to Unknown on every platform.
+        let kind = InputDeviceKind::detect("Nonexistent Test Microphone", 0, 0);
         assert_eq!(kind, InputDeviceKind::Unknown);
     }
 

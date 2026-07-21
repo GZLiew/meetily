@@ -1,6 +1,6 @@
 // Audio file decoder for retranscription feature
 // Uses Symphonia to decode MP4/AAC audio files, with ffmpeg fallback for
-// formats Symphonia can't handle (MKV, WebM, WMA)
+// formats Symphonia can't handle (MKV, WebM, WMA, MOV)
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
@@ -19,8 +19,10 @@ use symphonia::core::probe::Hint;
 use super::audio_processing::{audio_to_mono, resample, resample_audio};
 use super::ffmpeg::find_ffmpeg_path;
 
-/// Extensions requiring ffmpeg pre-conversion (Symphonia lacks these demuxers/codecs)
-const FFMPEG_ONLY_EXTENSIONS: &[&str] = &["mkv", "webm", "wma"];
+/// Extensions requiring ffmpeg pre-conversion (Symphonia lacks these demuxers/codecs).
+/// MOV is QuickTime: close to MP4, but Symphonia's isomp4 demuxer doesn't support
+/// its legacy sample descriptions (e.g. PCM variants), so it goes through ffmpeg.
+const FFMPEG_ONLY_EXTENSIONS: &[&str] = &["mkv", "webm", "wma", "mov"];
 
 /// Progress callback for long-running operations
 /// Returns current progress (0-100) and a message
@@ -400,7 +402,7 @@ pub fn decode_audio_file_with_progress(
 ) -> Result<DecodedAudio> {
     info!("Decoding audio file: {}", path.display());
 
-    // FFmpeg pre-conversion for unsupported formats (MKV, WebM, WMA).
+    // FFmpeg pre-conversion for unsupported formats (MKV, WebM, WMA, MOV).
     // If the file is in a format Symphonia can't decode, use ffmpeg to convert
     // it to a temporary WAV file first, then decode the WAV with Symphonia.
     // The _temp_wav_guard keeps the temp file alive until decoding completes,
@@ -652,7 +654,7 @@ mod tests {
     #[test]
     fn test_chunked_resample_downsamples_correctly() {
         // 48kHz to 16kHz = 3x downsampling with a 2-second signal
-        let input: Vec<f32> = (0..96000).map(|i| (i as f32 / 96000.0)).collect();
+        let input: Vec<f32> = (0..96000).map(|i| i as f32 / 96000.0).collect();
         let result = chunked_resample_with_progress(&input, 48000, 16000, None);
 
         // Output should be approximately 1/3 the length
@@ -807,10 +809,12 @@ mod tests {
         assert!(needs_ffmpeg_conversion(Path::new("video.mkv")));
         assert!(needs_ffmpeg_conversion(Path::new("audio.webm")));
         assert!(needs_ffmpeg_conversion(Path::new("audio.wma")));
+        assert!(needs_ffmpeg_conversion(Path::new("video.mov")));
         // Case insensitive
         assert!(needs_ffmpeg_conversion(Path::new("meeting.MKV")));
         assert!(needs_ffmpeg_conversion(Path::new("audio.WMA")));
         assert!(needs_ffmpeg_conversion(Path::new("audio.WebM")));
+        assert!(needs_ffmpeg_conversion(Path::new("meeting.MOV")));
         // Symphonia-native formats should NOT need ffmpeg
         assert!(!needs_ffmpeg_conversion(Path::new("audio.mp4")));
         assert!(!needs_ffmpeg_conversion(Path::new("audio.wav")));

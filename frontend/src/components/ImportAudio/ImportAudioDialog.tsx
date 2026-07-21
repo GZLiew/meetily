@@ -36,6 +36,7 @@ import { useImportAudio, ImportResult } from '@/hooks/useImportAudio';
 import { useRouter } from 'next/navigation';
 import { useSidebar } from '../Sidebar/SidebarProvider';
 import { LANGUAGES } from '@/constants/languages';
+import { getAudioFormatsDisplayList } from '@/constants/audioFormats';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 
 
@@ -321,7 +322,7 @@ export function ImportAudioDialog({
                       </>
                     )}
                   </Button>
-                  <p className="text-sm text-muted-foreground mt-2">MP4, WAV, MP3, FLAC, OGG, MKV, WebM, WMA</p>
+                  <p className="text-sm text-muted-foreground mt-2">{getAudioFormatsDisplayList()}</p>
                 </div>
               )}
 

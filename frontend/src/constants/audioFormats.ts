@@ -4,10 +4,10 @@
  *
  * Includes:
  * - Native formats: MP4, M4A, WAV, MP3, FLAC, OGG, AAC
- * - FFmpeg-backed: MKV, WebM, WMA
+ * - FFmpeg-backed: MKV, WebM, WMA, MOV
  */
 export const AUDIO_EXTENSIONS = [
-  'mp4', 'm4a', 'wav', 'mp3', 'flac', 'ogg', 'aac', 'mkv', 'webm', 'wma'
+  'mp4', 'm4a', 'wav', 'mp3', 'flac', 'ogg', 'aac', 'mkv', 'webm', 'wma', 'mov'
 ] as const;
 
 export type AudioExtension = typeof AUDIO_EXTENSIONS[number];
@@ -30,11 +30,12 @@ export const AUDIO_FORMAT_DISPLAY_NAMES: Record<AudioExtension, string> = {
   mkv: 'MKV',
   webm: 'WebM',
   wma: 'WMA',
+  mov: 'MOV',
 };
 
 /**
  * Get comma-separated list for UI display
- * Example: "MP4, M4A, WAV, MP3, FLAC, OGG, AAC, MKV, WebM, WMA"
+ * Example: "MP4, M4A, WAV, MP3, FLAC, OGG, AAC, MKV, WebM, WMA, MOV"
  */
 export function getAudioFormatsDisplayList(): string {
   return AUDIO_EXTENSIONS.map(ext => AUDIO_FORMAT_DISPLAY_NAMES[ext]).join(', ');
