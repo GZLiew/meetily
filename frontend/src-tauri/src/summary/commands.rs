@@ -499,19 +499,83 @@ pub async fn api_cancel_summary<R: Runtime>(
 /// instead of an error, since the live rolling summary is intentionally local-only.
 const LIVE_SUMMARY_LOCAL_ONLY: &str = "LIVE_SUMMARY_LOCAL_ONLY";
 
-/// Most-recent characters of transcript sent per live-summary call. Bounds the
-/// local model's context window and latency (~16k chars ≈ ~5.6k tokens).
+/// Most-recent characters of the new transcript excerpt sent per live-summary
+/// call. Bounds the local model's context window and latency. Normally a tick
+/// carries ~60s of speech; this is the safety net for a delayed or resumed tick.
 const LIVE_SUMMARY_MAX_CHARS: usize = 16_000;
+
+/// Trailing characters of the summary-so-far passed back as context. Only the
+/// most recent bullets matter for avoiding repetition, and this keeps the prompt
+/// from growing with the meeting.
+const LIVE_SUMMARY_CONTEXT_MAX_CHARS: usize = 4_000;
 
 /// Per-call wall-clock budget — shorter than generate_summary's internal 300s so
 /// a slow tick cannot pile up behind the ~60s regeneration cadence.
 const LIVE_SUMMARY_TIMEOUT_SECS: u64 = 45;
 
-/// System prompt for the ephemeral live rolling summary shown during recording.
-const LIVE_SUMMARY_SYSTEM_PROMPT: &str = "You are a real-time meeting assistant. You are given the running transcript of a meeting that is still in progress. Summarize what has been discussed SO FAR as a short, skimmable Markdown bullet list.\n\nRules:\n- Output ONLY Markdown bullet points (each top-level line starting with \"- \"). No title, no headings, no preamble, and no closing remarks.\n- Capture the key discussion points, decisions made, and action items mentioned so far.\n- Aim for 3-8 concise bullets. Use indented sub-bullets sparingly to group related detail.\n- The transcript is live and may end mid-sentence. Summarize only what is clearly stated; do not speculate about what will be said next.\n- Write in English regardless of the transcript language.\n- If there is not enough content to summarize yet, output exactly: \"- Not enough has been discussed yet.\"";
+/// Marker the model emits when an excerpt contains nothing worth recording;
+/// mapped to an empty result so the caller appends nothing.
+const LIVE_SUMMARY_NOTHING_NEW: &str = "NOTHING_NEW";
 
-/// Generates an ephemeral "rolling" bullet-point summary from the running
-/// transcript during an active recording. One-shot LLM call; nothing is persisted.
+/// System prompt for the first live-summary chunk of a recording, when there is
+/// no earlier summary to extend.
+const LIVE_SUMMARY_SYSTEM_PROMPT: &str = "You are a real-time meeting assistant. You are given the opening excerpt of a meeting transcript that is still in progress. Summarize it as a short, skimmable Markdown bullet list.\n\nRules:\n- Output ONLY Markdown bullet points (each top-level line starting with \"- \"). No title, no headings, no preamble, and no closing remarks.\n- Capture the key discussion points, decisions made, and action items mentioned.\n- Aim for 2-5 concise bullets. Use indented sub-bullets sparingly to group related detail.\n- The transcript is live and may end mid-sentence. Summarize only what is clearly stated; do not speculate about what will be said next.\n- Write in English regardless of the transcript language.\n- If the excerpt contains nothing worth recording (silence, greetings, small talk), output exactly: NOTHING_NEW";
+
+/// System prompt for every later chunk: the model sees only the new excerpt plus
+/// the summary so far, and returns bullets to append rather than a rewrite.
+const LIVE_SUMMARY_APPEND_SYSTEM_PROMPT: &str = "You are a real-time meeting assistant. You are given a NEW excerpt from a meeting transcript that is still in progress, along with the bullet summary already written for everything said before it. Write bullets covering ONLY the new excerpt; they will be appended to the existing summary.\n\nRules:\n- Output ONLY Markdown bullet points (each top-level line starting with \"- \"). No title, no headings, no preamble, and no closing remarks.\n- Summarize ONLY the new excerpt: what was newly discussed, decided, or assigned.\n- Do NOT repeat, restate, revise, or re-summarize anything already covered by the existing summary. The existing summary is context only — never reproduce its bullets.\n- Aim for 1-4 concise bullets.\n- The excerpt is live and may start or end mid-sentence. Summarize only what is clearly stated; do not speculate about what will be said next.\n- Write in English regardless of the transcript language.\n- If the excerpt adds nothing worth recording (silence, small talk, filler, or only points already summarized), output exactly: NOTHING_NEW";
+
+/// Keep the last `max_chars` characters of `text`, or all of it when shorter.
+fn tail_chars(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count > max_chars {
+        text.chars().skip(char_count - max_chars).collect()
+    } else {
+        text.to_string()
+    }
+}
+
+/// Builds the (system, user) prompt pair for one live-summary tick.
+///
+/// Without a summary so far this is the meeting's opening excerpt, so the model
+/// simply summarizes it. With one, the model is shown the existing bullets as
+/// context and asked for bullets covering only the new excerpt — both inputs are
+/// capped so the prompt stays a fixed size however long the meeting runs.
+fn build_live_summary_prompt(
+    transcript: &str,
+    previous_summary: Option<&str>,
+) -> (&'static str, String) {
+    let excerpt = tail_chars(transcript.trim(), LIVE_SUMMARY_MAX_CHARS);
+    let previous = previous_summary.map(str::trim).unwrap_or("");
+
+    if previous.is_empty() {
+        (
+            LIVE_SUMMARY_SYSTEM_PROMPT,
+            format!(
+                "Summarize this opening excerpt as Markdown bullet points.\n\n<transcript>\n{}\n</transcript>",
+                excerpt
+            ),
+        )
+    } else {
+        (
+            LIVE_SUMMARY_APPEND_SYSTEM_PROMPT,
+            format!(
+                "Here is the summary written so far. Do not repeat any of it.\n\n<existing_summary>\n{}\n</existing_summary>\n\nWrite Markdown bullet points covering ONLY this new excerpt of the transcript.\n\n<new_transcript>\n{}\n</new_transcript>",
+                tail_chars(previous, LIVE_SUMMARY_CONTEXT_MAX_CHARS),
+                excerpt
+            ),
+        )
+    }
+}
+
+/// Generates the next chunk of the ephemeral "rolling" summary shown during an
+/// active recording. One-shot LLM call; nothing is persisted.
+///
+/// Incremental by design: `transcript` is only the excerpt spoken since the last
+/// call, and `previous_summary` is the summary built so far. The model returns
+/// bullets for the new excerpt alone, which the caller appends — so earlier
+/// bullets are never rewritten, and prompt size stays flat as the meeting runs
+/// instead of growing with (and eventually truncating) the full transcript.
 ///
 /// Local-only: if the configured summary model is not Ollama or built-in AI (or
 /// no model is configured), returns the `LIVE_SUMMARY_LOCAL_ONLY` sentinel and
@@ -522,6 +586,7 @@ pub async fn generate_live_summary<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     transcript: String,
+    previous_summary: Option<String>,
 ) -> Result<String, String> {
     let pool = state.db_manager.pool();
 
@@ -545,25 +610,11 @@ pub async fn generate_live_summary<R: Runtime>(
         return Err(LIVE_SUMMARY_LOCAL_ONLY.to_string());
     }
 
-    // Cap to the most recent characters (protects local context + latency).
-    let trimmed = transcript.trim();
-    if trimmed.is_empty() {
+    if transcript.trim().is_empty() {
         return Ok(String::new());
     }
-    let char_count = trimmed.chars().count();
-    let capped: String = if char_count > LIVE_SUMMARY_MAX_CHARS {
-        trimmed
-            .chars()
-            .skip(char_count - LIVE_SUMMARY_MAX_CHARS)
-            .collect()
-    } else {
-        trimmed.to_string()
-    };
-
-    let user_prompt = format!(
-        "Summarize the meeting so far as Markdown bullet points.\n\n<transcript>\n{}\n</transcript>",
-        capped
-    );
+    let (system_prompt, user_prompt) =
+        build_live_summary_prompt(&transcript, previous_summary.as_deref());
 
     // The built-in AI sidecar needs the app data dir (service.rs pattern).
     let app_data_dir = app.path().app_data_dir().ok();
@@ -575,7 +626,7 @@ pub async fn generate_live_summary<R: Runtime>(
         &provider,
         &model_name,
         "", // local providers need no api key
-        LIVE_SUMMARY_SYSTEM_PROMPT,
+        system_prompt,
         &user_prompt,
         ollama_endpoint.as_deref(),
         None, // custom_openai_endpoint (cloud-only, unreachable here)
@@ -587,9 +638,28 @@ pub async fn generate_live_summary<R: Runtime>(
     );
 
     match tokio::time::timeout(Duration::from_secs(LIVE_SUMMARY_TIMEOUT_SECS), call).await {
-        Ok(Ok(raw)) => Ok(clean_llm_markdown_output(&raw)),
+        Ok(Ok(raw)) => Ok(strip_nothing_new(&clean_llm_markdown_output(&raw))),
         Ok(Err(e)) => Err(e),
         Err(_) => Err("Live summary timed out".to_string()),
+    }
+}
+
+/// Maps the model's "nothing to add" marker to an empty result.
+///
+/// Models emit the marker in varying shapes — bare, bulleted, or fenced in
+/// punctuation — so anything whose only alphanumeric content is the marker
+/// counts. Bullets that merely mention it alongside real content are kept.
+fn strip_nothing_new(markdown: &str) -> String {
+    let trimmed = markdown.trim();
+    let stripped: String = trimmed
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+
+    if stripped.eq_ignore_ascii_case(LIVE_SUMMARY_NOTHING_NEW) {
+        String::new()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -641,4 +711,100 @@ pub async fn api_prefill_meeting_summary<R: Runtime>(
         meeting_id
     );
     Ok(serde_json::json!({ "message": "Meeting summary prefilled" }))
+}
+
+#[cfg(test)]
+mod live_summary_tests {
+    use super::*;
+
+    #[test]
+    fn tail_chars_keeps_the_most_recent_text() {
+        assert_eq!(tail_chars("abcdef", 3), "def");
+        assert_eq!(tail_chars("abc", 10), "abc");
+        assert_eq!(tail_chars("", 10), "");
+    }
+
+    #[test]
+    fn tail_chars_splits_on_characters_not_bytes() {
+        // Byte slicing here would panic or corrupt the text
+        assert_eq!(tail_chars("añ😀bé", 2), "bé");
+    }
+
+    #[test]
+    fn nothing_new_marker_becomes_empty() {
+        assert_eq!(strip_nothing_new("NOTHING_NEW"), "");
+        assert_eq!(strip_nothing_new("  NOTHING_NEW  "), "");
+        // Models dress the marker up in bullets, quotes, or code fences
+        assert_eq!(strip_nothing_new("- NOTHING_NEW"), "");
+        assert_eq!(strip_nothing_new("\"NOTHING_NEW\""), "");
+        assert_eq!(strip_nothing_new("- **NOTHING_NEW**"), "");
+        assert_eq!(strip_nothing_new("nothing_new"), "");
+    }
+
+    #[test]
+    fn first_chunk_asks_for_a_plain_summary() {
+        let (system, user) = build_live_summary_prompt("We kicked off the project.", None);
+
+        assert_eq!(system, LIVE_SUMMARY_SYSTEM_PROMPT);
+        assert!(user.contains("We kicked off the project."));
+        assert!(
+            !user.contains("<existing_summary>"),
+            "there is no earlier summary to show"
+        );
+    }
+
+    #[test]
+    fn blank_previous_summary_is_treated_as_the_first_chunk() {
+        for previous in [Some(""), Some("   \n  "), None] {
+            let (system, user) = build_live_summary_prompt("Opening remarks.", previous);
+            assert_eq!(system, LIVE_SUMMARY_SYSTEM_PROMPT);
+            assert!(!user.contains("<existing_summary>"));
+        }
+    }
+
+    #[test]
+    fn later_chunks_carry_the_summary_so_far_as_context() {
+        let (system, user) =
+            build_live_summary_prompt("Then we agreed to ship.", Some("- Kicked off the project"));
+
+        assert_eq!(system, LIVE_SUMMARY_APPEND_SYSTEM_PROMPT);
+        assert!(user.contains("<existing_summary>"));
+        assert!(user.contains("- Kicked off the project"));
+        assert!(user.contains("<new_transcript>"));
+        assert!(user.contains("Then we agreed to ship."));
+        assert!(system.contains("Do NOT repeat"));
+    }
+
+    #[test]
+    fn prompt_size_stays_bounded_as_the_meeting_runs() {
+        // A long-running meeting: both the excerpt and the summary-so-far exceed
+        // their caps. The prompt must not grow with either.
+        // Filler characters are ones the prompt template itself never uses.
+        let transcript = "Z".repeat(LIVE_SUMMARY_MAX_CHARS * 3);
+        let previous = "9".repeat(LIVE_SUMMARY_CONTEXT_MAX_CHARS * 3);
+
+        let (_, user) = build_live_summary_prompt(&transcript, Some(&previous));
+
+        assert_eq!(user.matches('Z').count(), LIVE_SUMMARY_MAX_CHARS);
+        assert_eq!(user.matches('9').count(), LIVE_SUMMARY_CONTEXT_MAX_CHARS);
+    }
+
+    #[test]
+    fn the_most_recent_excerpt_is_kept_when_capping() {
+        let transcript = format!("{}TAIL", "Z".repeat(LIVE_SUMMARY_MAX_CHARS));
+
+        let (_, user) = build_live_summary_prompt(&transcript, None);
+
+        assert!(user.contains("TAIL"), "the newest speech must survive capping");
+    }
+
+    #[test]
+    fn real_bullets_are_preserved() {
+        let bullets = "- Agreed to ship on Friday\n- Alice owns the migration";
+        assert_eq!(strip_nothing_new(bullets), bullets);
+
+        // A bullet that merely mentions the marker still carries content
+        let mentions = "- Discussed the NOTHING_NEW sentinel handling";
+        assert_eq!(strip_nothing_new(mentions), mentions);
+    }
 }

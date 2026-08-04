@@ -1,10 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Loader2, Sparkles, Settings2 } from 'lucide-react';
 import { useLiveSummary } from '@/hooks/useLiveSummary';
+
+// Distance from the bottom still treated as "following along"
+const STICK_TO_BOTTOM_THRESHOLD_PX = 60;
 
 // Re-renders a relative "updated Ns ago" label off a fixed timestamp.
 function useAgoLabel(ts: number | null): string {
@@ -24,12 +27,32 @@ function useAgoLabel(ts: number | null): string {
 
 /**
  * Live rolling summary shown beside the transcript during an active recording.
- * Renders the bullet markdown produced by `useLiveSummary` (regenerated ~every
- * 60s from the transcript so far). Read-only — deliberately not the BlockNote editor.
+ * Renders the bullet markdown produced by `useLiveSummary`, which appends new
+ * bullets ~every 60s rather than rewriting what is already there. Read-only —
+ * deliberately not the BlockNote editor.
+ *
+ * Because the list only grows, the panel follows the newest bullets unless the
+ * reader has scrolled up to look back.
  */
 export function LiveSummaryPanel() {
   const { summaryMarkdown, isGenerating, lastUpdatedAt, error, needsLocalModel } = useLiveSummary();
   const ago = useAgoLabel(lastUpdatedAt);
+
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+
+  const handleScroll = () => {
+    const el = bodyRef.current;
+    if (!el) return;
+    stickToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_TO_BOTTOM_THRESHOLD_PX;
+  };
+
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || !stickToBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [summaryMarkdown]);
 
   return (
     <div className="hidden md:flex flex-1 min-w-0 bg-card flex-col overflow-hidden">
@@ -49,7 +72,7 @@ export function LiveSummaryPanel() {
       </div>
 
       {/* Body */}
-      <div className="flex-1 overflow-y-auto p-4">
+      <div ref={bodyRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-4">
         {needsLocalModel ? (
           <div className="flex flex-col items-center gap-2 pt-8 text-center text-muted-foreground">
             <Settings2 size={20} />

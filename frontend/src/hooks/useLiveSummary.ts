@@ -9,7 +9,7 @@ import { useConfig } from '@/contexts/ConfigContext';
 const REGEN_INTERVAL_MS = 60_000; // steady cadence between successful summaries
 const FAST_RETRY_MS = 10_000; // retry cadence until the first summary lands
 const FIRST_ATTEMPT_MS = 10_000; // let some transcript accrue before the first try
-const MIN_CHARS_TO_SUMMARIZE = 200; // skip until there's enough to summarize
+const MIN_NEW_CHARS_TO_SUMMARIZE = 200; // skip until enough NEW speech has accrued
 
 // Shared with useRecordingStop, which reads this after the meeting is saved to
 // pre-fill the meeting's summary. Must NOT be cleared on stop (see the effect below).
@@ -30,12 +30,32 @@ export interface LiveSummaryState {
 }
 
 /**
- * Drives the ephemeral "live rolling summary" during an active recording:
- * every ~60s it summarizes the transcript-so-far (from `transcriptsRef`) into a
- * bullet list via the local-only `generate_live_summary` command.
+ * Joins an existing bullet summary with newly generated bullets.
  *
- * The latest summary is mirrored to sessionStorage so `useRecordingStop` can
- * pre-fill the saved meeting's summary with it.
+ * Both sides are Markdown bullet lists, so a single newline keeps them one
+ * contiguous list rather than starting a second one.
+ */
+export function appendSummaryBullets(existing: string, addition: string): string {
+  const before = existing.trim();
+  const after = addition.trim();
+  if (!after) return before;
+  if (!before) return after;
+  return `${before}\n${after}`;
+}
+
+/**
+ * Drives the ephemeral "live rolling summary" during an active recording.
+ *
+ * Every ~60s it summarizes only the transcript segments spoken since the last
+ * run and *appends* the resulting bullets, so earlier bullets are never
+ * rewritten or reordered as the meeting goes on. The summary so far is passed
+ * back to the model as context purely so it avoids repeating itself.
+ *
+ * Segments are tracked by id rather than by offset because the transcript array
+ * is re-sorted as out-of-order chunks arrive, which would shift any index.
+ *
+ * The accumulated summary is mirrored to sessionStorage so `useRecordingStop`
+ * can pre-fill the saved meeting's summary with it.
  */
 export function useLiveSummary(): LiveSummaryState {
   const { transcriptsRef } = useTranscripts();
@@ -52,29 +72,42 @@ export function useLiveSummary(): LiveSummaryState {
   const [needsLocalModel, setNeedsLocalModel] = useState(false);
 
   // Non-rendering guards:
-  const lastSummarizedLenRef = useRef(0); // skip when the transcript hasn't grown (silence/pause)
+  const summarizedIdsRef = useRef<Set<string>>(new Set()); // transcript segments already folded into the summary
+  const summaryMarkdownRef = useRef(''); // accumulated summary, mirrors summaryMarkdown
   const producedFirstRef = useRef(false); // governs fast-retry vs steady cadence
   const wasRecordingRef = useRef(false); // detects the actual start transition
 
   const runOnce = useCallback(async () => {
-    const text = transcriptsRef.current
+    // Only the segments not yet summarized — this is what gets sent.
+    const pending = transcriptsRef.current.filter((t) => !summarizedIdsRef.current.has(t.id));
+    const newText = pending
       .map((t) => t.text)
       .join(' ')
       .trim();
 
-    if (text.length < MIN_CHARS_TO_SUMMARIZE) return; // too little to summarize yet
-    if (text.length === lastSummarizedLenRef.current) return; // unchanged since last run
+    if (newText.length < MIN_NEW_CHARS_TO_SUMMARIZE) return; // not enough new speech yet
 
     setIsGenerating(true);
     try {
       const md =
-        (await invoke<string>('generate_live_summary', { transcript: text }))?.trim() ?? '';
-      lastSummarizedLenRef.current = text.length;
+        (
+          await invoke<string>('generate_live_summary', {
+            transcript: newText,
+            previousSummary: summaryMarkdownRef.current || null,
+          })
+        )?.trim() ?? '';
+
+      // Consume the segments even when the model had nothing to add (silence,
+      // small talk), otherwise the same excerpt is re-sent every tick forever.
+      pending.forEach((t) => summarizedIdsRef.current.add(t.id));
+
       if (md) {
-        setSummaryMarkdown(md);
+        const combined = appendSummaryBullets(summaryMarkdownRef.current, md);
+        summaryMarkdownRef.current = combined;
+        setSummaryMarkdown(combined);
         producedFirstRef.current = true;
         try {
-          sessionStorage.setItem(LIVE_SUMMARY_STORAGE_KEY, md);
+          sessionStorage.setItem(LIVE_SUMMARY_STORAGE_KEY, combined);
         } catch {
           /* sessionStorage unavailable — pre-fill simply won't happen */
         }
@@ -90,7 +123,8 @@ export function useLiveSummary(): LiveSummaryState {
       } else {
         setError(msg);
       }
-      // Do NOT advance lastSummarizedLenRef on failure so the next tick retries.
+      // Segments stay unconsumed on failure, so the next tick retries them
+      // together with whatever was said in the meantime.
     } finally {
       setIsGenerating(false);
     }
@@ -112,7 +146,8 @@ export function useLiveSummary(): LiveSummaryState {
     setIsGenerating(false);
     setLastUpdatedAt(null);
     setError(null);
-    lastSummarizedLenRef.current = 0;
+    summarizedIdsRef.current = new Set();
+    summaryMarkdownRef.current = '';
     producedFirstRef.current = false;
 
     if (!isRecording) {
