@@ -8,7 +8,7 @@ use serde::{Serialize, Deserialize};
 use std::path::PathBuf;
 
 use super::recording_state::AudioChunk;
-use super::audio_processing::create_meeting_folder;
+use super::meeting_folder::MeetingFolderConfig;
 use super::incremental_saver::IncrementalAudioSaver;
 
 /// Structured transcript segment for JSON export
@@ -137,7 +137,12 @@ impl RecordingSaver {
     ///
     /// # Arguments
     /// * `auto_save` - If true, creates checkpoints and enables saving. If false, audio chunks are discarded.
-    pub fn start_accumulation(&mut self, auto_save: bool) -> mpsc::UnboundedSender<AudioChunk> {
+    /// * `folder_config` - Base folder and name prefix for the meeting folder, from user preferences
+    pub fn start_accumulation(
+        &mut self,
+        auto_save: bool,
+        folder_config: MeetingFolderConfig,
+    ) -> mpsc::UnboundedSender<AudioChunk> {
         if auto_save {
             info!("Initializing incremental audio saver for recording (auto-save ENABLED)");
         } else {
@@ -151,7 +156,7 @@ impl RecordingSaver {
         // Initialize meeting folder and incremental saver ONLY if auto_save is enabled
         if auto_save {
             if let Some(name) = self.meeting_name.clone() {
-                match self.initialize_meeting_folder(&name, true) {
+                match self.initialize_meeting_folder(&name, &folder_config, true) {
                     Ok(()) => info!("Successfully initialized meeting folder with checkpoints"),
                     Err(e) => {
                         error!("Failed to initialize meeting folder: {}", e);
@@ -163,7 +168,7 @@ impl RecordingSaver {
             // When auto_save is false, still create meeting folder for transcripts/metadata
             // but skip .checkpoints directory
             if let Some(name) = self.meeting_name.clone() {
-                match self.initialize_meeting_folder(&name, false) {
+                match self.initialize_meeting_folder(&name, &folder_config, false) {
                     Ok(()) => info!("Successfully initialized meeting folder (transcripts only)"),
                     Err(e) => {
                         error!("Failed to initialize meeting folder: {}", e);
@@ -226,13 +231,16 @@ impl RecordingSaver {
     ///
     /// # Arguments
     /// * `meeting_name` - Name of the meeting
+    /// * `folder_config` - Base folder and name prefix, resolved from user preferences
     /// * `create_checkpoints` - Whether to create .checkpoints/ directory and IncrementalAudioSaver
-    fn initialize_meeting_folder(&mut self, meeting_name: &str, create_checkpoints: bool) -> Result<()> {
-        // Load preferences to get base recordings folder
-        let base_folder = super::recording_preferences::get_default_recordings_folder();
-
+    fn initialize_meeting_folder(
+        &mut self,
+        meeting_name: &str,
+        folder_config: &MeetingFolderConfig,
+        create_checkpoints: bool,
+    ) -> Result<()> {
         // Create meeting folder structure (with or without .checkpoints/ subdirectory)
-        let meeting_folder = create_meeting_folder(&base_folder, meeting_name, create_checkpoints)?;
+        let meeting_folder = folder_config.create(meeting_name, create_checkpoints)?;
 
         // Only initialize incremental saver if checkpoints are needed (auto_save is true)
         if create_checkpoints {

@@ -16,6 +16,10 @@ pub struct RecordingPreferences {
     pub save_folder: PathBuf,
     pub auto_save: bool,
     pub file_format: String,
+    /// Prefix applied verbatim to every new meeting folder name, e.g. `Work_`
+    /// produces `Work_Standup_2026-07-28_10-30`. `None`/empty means no prefix.
+    #[serde(default)]
+    pub folder_prefix: Option<String>,
     #[serde(default)]
     pub preferred_mic_device: Option<String>,
     #[serde(default)]
@@ -31,6 +35,7 @@ impl Default for RecordingPreferences {
             save_folder: get_default_recordings_folder(),
             auto_save: true,
             file_format: "mp4".to_string(),
+            folder_prefix: None,
             preferred_mic_device: None,
             preferred_system_device: None,
             #[cfg(target_os = "macos")]
@@ -83,13 +88,6 @@ pub fn ensure_recordings_directory(path: &PathBuf) -> Result<()> {
         info!("Created recordings directory: {:?}", path);
     }
     Ok(())
-}
-
-/// Generate a unique filename for a recording
-pub fn generate_recording_filename(format: &str) -> String {
-    let now = chrono::Utc::now();
-    let timestamp = now.format("%Y%m%d_%H%M%S");
-    format!("recording_{}.{}", timestamp, format)
 }
 
 /// Load recording preferences from store

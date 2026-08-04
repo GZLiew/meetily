@@ -19,6 +19,8 @@ export interface CurrentMeeting {
   id: string;
   title: string;
   createdAt?: string;
+  /** Recording folder on disk, absent for meetings recorded before folders existed. */
+  folderPath?: string | null;
 }
 
 // Search result type for transcript search
@@ -88,11 +90,12 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const fetchMeetings = React.useCallback(async () => {
     if (serverAddress) {
       try {
-        const meetings = await invoke('api_get_meetings') as Array<{ id: string, title: string, created_at: string }>;
+        const meetings = await invoke('api_get_meetings') as Array<{ id: string, title: string, created_at: string, folder_path: string | null }>;
         const transformedMeetings = meetings.map((meeting: any) => ({
           id: meeting.id,
           title: meeting.title,
-          createdAt: meeting.created_at
+          createdAt: meeting.created_at,
+          folderPath: meeting.folder_path ?? null
         }));
         setMeetings(transformedMeetings);
         Analytics.trackBackendConnection(true);

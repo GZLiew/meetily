@@ -137,31 +137,40 @@ pub async fn start_retranscription<R: Runtime>(
 }
 
 /// Find audio file in meeting folder
-/// Tries common names first, then scans for any file with an audio extension
+/// Tries the canonical names first, then scans for any file with an audio extension
 pub(crate) fn find_audio_file(folder: &Path) -> Result<PathBuf> {
-    let candidates = [
-        "audio.mp4", "audio.m4a", "audio.wav", "audio.mp3",
-        "audio.flac", "audio.ogg", "recording.mp4",
-        "audio.mkv", "audio.webm", "audio.wma",
-    ];
-
-    for name in candidates {
-        let path = folder.join(name);
+    // Recording and import both write `audio.<ext>`. Deriving the candidates from
+    // AUDIO_EXTENSIONS keeps this in step whenever a new format is supported —
+    // a hardcoded list here silently fell through to the scan below for .mov.
+    for ext in AUDIO_EXTENSIONS {
+        let path = folder.join(format!("audio.{}", ext));
         if path.exists() {
             return Ok(path);
         }
     }
 
-    // Fallback: scan folder for any file with an audio extension
+    // Legacy name used by older recordings
+    let legacy = folder.join("recording.mp4");
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+
+    // Fallback: scan folder for any file with an audio extension. Sorted so the
+    // result does not depend on filesystem enumeration order.
     if let Ok(entries) = std::fs::read_dir(folder) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(ext) = path.extension() {
-                let ext = ext.to_string_lossy().to_lowercase();
-                if AUDIO_EXTENSIONS.contains(&ext.as_str()) {
-                    return Ok(path);
-                }
-            }
+        let mut audio_files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .map(|ext| AUDIO_EXTENSIONS.contains(&ext.to_string_lossy().to_lowercase().as_str()))
+                    .unwrap_or(false)
+            })
+            .collect();
+        audio_files.sort();
+
+        if let Some(path) = audio_files.into_iter().next() {
+            return Ok(path);
         }
     }
 

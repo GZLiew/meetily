@@ -93,6 +93,11 @@ const Sidebar: React.FC = () => {
     currentTitle: ''
   });
   const [editingTitle, setEditingTitle] = useState<string>('');
+  // Recording folder name, edited alongside the title. Empty when the meeting
+  // has no folder on disk (older meetings, or auto-save was off at the time).
+  const [editingFolderName, setEditingFolderName] = useState<string>('');
+  const [originalFolderName, setOriginalFolderName] = useState<string>('');
+  const [isSavingEdit, setIsSavingEdit] = useState<boolean>(false);
 
   // Ensure 'meetings' folder is always expanded
   useEffect(() => {
@@ -370,18 +375,34 @@ const Sidebar: React.FC = () => {
     setDeleteModalState({ isOpen: false, itemId: null });
   };
 
+  // Last path component of a recording folder, on either path separator
+  const folderBasename = (path: string) => path.split(/[/\\]/).filter(Boolean).pop() ?? '';
+
   // Handle modal editing of meeting names
   const handleEditStart = (meetingId: string, currentTitle: string) => {
+    const folderPath = meetings.find((m: CurrentMeeting) => m.id === meetingId)?.folderPath;
+    const folderName = folderPath ? folderBasename(folderPath) : '';
+
     setEditModalState({
       isOpen: true,
       meetingId: meetingId,
       currentTitle: currentTitle
     });
     setEditingTitle(currentTitle);
+    setEditingFolderName(folderName);
+    setOriginalFolderName(folderName);
+  };
+
+  const closeEditModal = () => {
+    setEditModalState({ isOpen: false, meetingId: null, currentTitle: '' });
+    setEditingTitle('');
+    setEditingFolderName('');
+    setOriginalFolderName('');
   };
 
   const handleEditConfirm = async () => {
     const newTitle = editingTitle.trim();
+    const newFolderName = editingFolderName.trim();
     const meetingId = editModalState.meetingId;
 
     if (!meetingId) return;
@@ -392,42 +413,97 @@ const Sidebar: React.FC = () => {
       return;
     }
 
-    try {
-      await invoke('api_save_meeting_title', {
-        meetingId: meetingId,
-        title: newTitle,
-      });
+    const titleChanged = newTitle !== editModalState.currentTitle;
+    // Only meetings that already have a folder can have it renamed
+    const folderChanged = !!originalFolderName && newFolderName !== originalFolderName;
 
-      // Update local state
-      const updatedMeetings = meetings.map((m: CurrentMeeting) =>
-        m.id === meetingId ? { ...m, title: newTitle } : m
-      );
-      setMeetings(updatedMeetings);
-
-      // Update current meeting if it's the one being edited
-      if (currentMeeting?.id === meetingId) {
-        setCurrentMeeting({ id: meetingId, title: newTitle });
-      }
-
-      // Track the edit
-      Analytics.trackButtonClick('edit_meeting_title', 'sidebar');
-
-      toast.success("Meeting title updated successfully");
-
-      // Close modal and reset state
-      setEditModalState({ isOpen: false, meetingId: null, currentTitle: '' });
-      setEditingTitle('');
-    } catch (error) {
-      console.error('Failed to update meeting title:', error);
-      toast.error("Failed to update meeting title", {
-        description: error instanceof Error ? error.message : String(error)
-      });
+    if (folderChanged && !newFolderName) {
+      toast.error("Recording folder name cannot be empty");
+      return;
     }
+
+    if (!titleChanged && !folderChanged) {
+      closeEditModal();
+      return;
+    }
+
+    setIsSavingEdit(true);
+
+    // Apply the title first, and reflect it locally straight away so it is not
+    // lost if the folder rename below fails.
+    if (titleChanged) {
+      try {
+        await invoke('api_save_meeting_title', {
+          meetingId: meetingId,
+          title: newTitle,
+        });
+
+        setMeetings(meetings.map((m: CurrentMeeting) =>
+          m.id === meetingId ? { ...m, title: newTitle } : m
+        ));
+        if (currentMeeting?.id === meetingId) {
+          setCurrentMeeting({ ...currentMeeting, id: meetingId, title: newTitle });
+        }
+
+        Analytics.trackButtonClick('edit_meeting_title', 'sidebar');
+      } catch (error) {
+        console.error('Failed to update meeting title:', error);
+        toast.error("Failed to update meeting title", {
+          description: error instanceof Error ? error.message : String(error)
+        });
+        setIsSavingEdit(false);
+        return;
+      }
+    }
+
+    if (folderChanged) {
+      try {
+        // The backend sanitizes the name, so trust its response over the input
+        const result = await invoke<{ folder_path: string; folder_name: string }>(
+          'api_rename_meeting_folder',
+          { meetingId: meetingId, newFolderName: newFolderName }
+        );
+
+        setMeetings(meetings.map((m: CurrentMeeting) =>
+          m.id === meetingId
+            ? { ...m, title: newTitle, folderPath: result.folder_path }
+            : m
+        ));
+        // Keep the open meeting pointing at the folder that now exists on disk
+        if (currentMeeting?.id === meetingId) {
+          setCurrentMeeting({
+            ...currentMeeting,
+            id: meetingId,
+            title: newTitle,
+            folderPath: result.folder_path
+          });
+        }
+        setEditingFolderName(result.folder_name);
+        setOriginalFolderName(result.folder_name);
+
+        Analytics.trackButtonClick('rename_meeting_folder', 'sidebar');
+      } catch (error) {
+        console.error('Failed to rename recording folder:', error);
+        // Keep the modal open so the user can correct the folder name
+        toast.error("Failed to rename recording folder", {
+          description: error instanceof Error ? error.message : String(error)
+        });
+        setIsSavingEdit(false);
+        return;
+      }
+    }
+
+    setIsSavingEdit(false);
+    toast.success(
+      folderChanged && titleChanged ? "Meeting and recording folder updated"
+        : folderChanged ? "Recording folder renamed"
+        : "Meeting title updated successfully"
+    );
+    closeEditModal();
   };
 
   const handleEditCancel = () => {
-    setEditModalState({ isOpen: false, meetingId: null, currentTitle: '' });
-    setEditingTitle('');
+    closeEditModal();
   };
 
   const toggleFolder = (folderId: string) => {
@@ -846,10 +922,10 @@ const Sidebar: React.FC = () => {
       }}>
         <DialogContent className="sm:max-w-[425px]">
           <VisuallyHidden>
-            <DialogTitle>Edit Meeting Title</DialogTitle>
+            <DialogTitle>Edit Meeting</DialogTitle>
           </VisuallyHidden>
           <div className="py-4">
-            <h3 className="text-lg font-semibold mb-4">Edit Meeting Title</h3>
+            <h3 className="text-lg font-semibold mb-4">Edit Meeting</h3>
             <div className="space-y-4">
               <div>
                 <label htmlFor="meeting-title" className="block text-sm font-medium text-foreground mb-2">
@@ -867,25 +943,56 @@ const Sidebar: React.FC = () => {
                       handleEditCancel();
                     }
                   }}
-                  className="w-full px-3 py-2 border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  disabled={isSavingEdit}
+                  className="w-full px-3 py-2 border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
                   placeholder="Enter meeting title"
                   autoFocus
                 />
               </div>
+
+              {/* Recording folder — only meetings with a folder on disk can be renamed */}
+              {originalFolderName && (
+                <div>
+                  <label htmlFor="meeting-folder" className="block text-sm font-medium text-foreground mb-2">
+                    Recording Folder
+                  </label>
+                  <input
+                    id="meeting-folder"
+                    type="text"
+                    value={editingFolderName}
+                    onChange={(e) => setEditingFolderName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        handleEditConfirm();
+                      } else if (e.key === 'Escape') {
+                        handleEditCancel();
+                      }
+                    }}
+                    disabled={isSavingEdit}
+                    className="w-full px-3 py-2 border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
+                    placeholder="Recording folder name"
+                  />
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Renames the folder holding this meeting&apos;s audio and transcript on disk.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
           <DialogFooter>
             <button
               onClick={handleEditCancel}
-              className="px-4 py-2 text-sm font-medium text-secondary-foreground bg-secondary hover:bg-secondary/80 rounded-md transition-colors"
+              disabled={isSavingEdit}
+              className="px-4 py-2 text-sm font-medium text-secondary-foreground bg-secondary hover:bg-secondary/80 rounded-md transition-colors disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               onClick={handleEditConfirm}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors"
+              disabled={isSavingEdit}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors disabled:opacity-50"
             >
-              Save
+              {isSavingEdit ? 'Saving…' : 'Save'}
             </button>
           </DialogFooter>
         </DialogContent>

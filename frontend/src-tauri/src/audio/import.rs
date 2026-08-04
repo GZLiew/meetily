@@ -17,10 +17,10 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
-use super::audio_processing::create_meeting_folder;
 use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json};
 use super::constants::AUDIO_EXTENSIONS;
-use super::recording_preferences::get_default_recordings_folder;
+use super::meeting_folder::MeetingFolderConfig;
+use super::recording_preferences::load_recording_preferences;
 
 /// Global flag to track if import is in progress
 static IMPORT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -338,9 +338,15 @@ async fn run_import<R: Runtime>(
         return Err(anyhow!("Import cancelled"));
     }
 
-    // Create meeting folder
-    let base_folder = get_default_recordings_folder();
-    let meeting_folder = create_meeting_folder(&base_folder, &title, false)?;
+    // Create meeting folder, honouring the configured save folder and name prefix
+    let folder_config = match load_recording_preferences(&app).await {
+        Ok(prefs) => MeetingFolderConfig::from_preferences(&prefs),
+        Err(e) => {
+            warn!("Failed to load recording preferences for import, using defaults: {}", e);
+            MeetingFolderConfig::default()
+        }
+    };
+    let meeting_folder = folder_config.create(&title, false)?;
 
     // Copy audio file to meeting folder
     emit_progress(&app, "copying", 10, "Copying audio file...");

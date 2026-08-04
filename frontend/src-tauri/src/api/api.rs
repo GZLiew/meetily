@@ -31,6 +31,9 @@ pub struct Meeting {
     pub id: String,
     pub title: String,
     pub created_at: String,
+    /// Recording folder on disk, when the meeting has one. Lets the UI offer a
+    /// folder rename and show where the recording lives.
+    pub folder_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -343,6 +346,7 @@ pub async fn api_get_meetings<R: Runtime>(
                     id: m.id,
                     title: m.title,
                     created_at: m.created_at.0.to_rfc3339(),
+                    folder_path: m.folder_path,
                 })
                 .collect();
             Ok(result)
@@ -926,6 +930,66 @@ pub async fn api_save_meeting_title<R: Runtime>(
             Err(format!("Failed to update meeting: {}", e))
         }
     }
+}
+
+/// Renames a meeting's recording folder on disk and repoints the database at it.
+///
+/// `new_folder_name` is a folder name, not a path: it is sanitized to a single
+/// component so the folder always stays in the recordings directory next to its
+/// siblings. Renaming is deliberately separate from renaming the meeting title —
+/// the folder is what external tools (backup, sync) see, so it only moves when
+/// the user explicitly asks.
+#[tauri::command]
+pub async fn api_rename_meeting_folder<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    new_folder_name: String,
+) -> Result<serde_json::Value, String> {
+    log_info!(
+        "api_rename_meeting_folder called for meeting_id: {}",
+        meeting_id
+    );
+
+    let pool = state.db_manager.pool();
+
+    let current_path = MeetingsRepository::get_meeting_folder_path(pool, &meeting_id)
+        .await
+        .map_err(|e| format!("Failed to look up meeting folder: {}", e))?
+        .ok_or_else(|| "This meeting has no recording folder to rename".to_string())?;
+
+    let new_path = crate::audio::meeting_folder::rename_meeting_folder(
+        std::path::Path::new(&current_path),
+        &new_folder_name,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let new_path_str = new_path.to_string_lossy().to_string();
+
+    // The folder has already moved; a database failure here would leave the two
+    // out of sync, so surface it rather than reporting success.
+    if !MeetingsRepository::update_meeting_folder_path(pool, &meeting_id, &new_path_str)
+        .await
+        .map_err(|e| {
+            format!(
+                "Renamed the folder to '{}' but failed to update the database: {}",
+                new_path_str, e
+            )
+        })?
+    {
+        return Err(format!("No meeting found with id {}", meeting_id));
+    }
+
+    log_info!("Renamed meeting folder to {}", new_path_str);
+
+    Ok(serde_json::json!({
+        "message": "Recording folder renamed",
+        "folder_path": new_path_str,
+        "folder_name": new_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
+    }))
 }
 
 /// Updates the text of a single transcript segment (block) by its id.

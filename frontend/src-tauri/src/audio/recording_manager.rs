@@ -60,11 +60,13 @@ impl RecordingManager {
     /// * `microphone_device` - Optional microphone device to use
     /// * `system_device` - Optional system audio device to use
     /// * `auto_save` - Whether to save audio checkpoints (true) or just transcripts/metadata (false)
+    /// * `folder_config` - Base folder and name prefix for this meeting's folder, from user preferences
     pub async fn start_recording(
         &mut self,
         microphone_device: Option<Arc<AudioDevice>>,
         system_device: Option<Arc<AudioDevice>>,
         auto_save: bool,
+        folder_config: super::meeting_folder::MeetingFolderConfig,
     ) -> Result<mpsc::UnboundedReceiver<AudioChunk>> {
         info!("Starting recording manager (auto_save: {})", auto_save);
 
@@ -74,7 +76,9 @@ impl RecordingManager {
         // CRITICAL FIX: Create recording sender for pre-mixed audio from pipeline
         // Pipeline will mix mic + system audio professionally and send to this channel
         // Pass auto_save to control whether audio checkpoints are created
-        let recording_sender = self.recording_saver.start_accumulation(auto_save);
+        let recording_sender = self
+            .recording_saver
+            .start_accumulation(auto_save, folder_config);
 
         // Start recording state first
         self.state.start_recording()?;
@@ -167,7 +171,11 @@ impl RecordingManager {
     ///
     /// User still hears audio via Bluetooth (playback), but recording captures
     /// via stable wired path for best quality.
-    pub async fn start_recording_with_defaults_and_auto_save(&mut self, auto_save: bool) -> Result<mpsc::UnboundedReceiver<AudioChunk>> {
+    pub async fn start_recording_with_defaults_and_auto_save(
+        &mut self,
+        auto_save: bool,
+        folder_config: super::meeting_folder::MeetingFolderConfig,
+    ) -> Result<mpsc::UnboundedReceiver<AudioChunk>> {
         #[cfg(target_os = "macos")]
         {
             info!("🎙️ [macOS] Starting recording with smart device selection (Bluetooth override enabled)");
@@ -186,7 +194,8 @@ impl RecordingManager {
             }
 
             // Start recording with selected devices and auto_save setting
-            self.start_recording(microphone_device, system_device, auto_save).await
+            self.start_recording(microphone_device, system_device, auto_save, folder_config)
+                .await
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -221,7 +230,8 @@ impl RecordingManager {
                 return Err(anyhow::anyhow!("No microphone device available"));
             }
 
-            self.start_recording(microphone_device, system_device, auto_save).await
+            self.start_recording(microphone_device, system_device, auto_save, folder_config)
+                .await
         }
     }
 

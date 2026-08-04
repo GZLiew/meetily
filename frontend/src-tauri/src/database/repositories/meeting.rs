@@ -165,6 +165,51 @@ impl MeetingsRepository {
         Ok((transcripts, total.0))
     }
 
+    /// Read a meeting's recording folder path, if it has one.
+    pub async fn get_meeting_folder_path(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<Option<String>, SqlxError> {
+        if meeting_id.trim().is_empty() {
+            return Err(SqlxError::Protocol(
+                "meeting_id cannot be empty".to_string(),
+            ));
+        }
+
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT folder_path FROM meetings WHERE id = ?")
+                .bind(meeting_id)
+                .fetch_optional(pool)
+                .await?;
+
+        Ok(row.and_then(|(folder_path,)| folder_path))
+    }
+
+    /// Point a meeting at a different recording folder on disk.
+    ///
+    /// Returns false when no meeting has this id.
+    pub async fn update_meeting_folder_path(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        folder_path: &str,
+    ) -> Result<bool, SqlxError> {
+        if meeting_id.trim().is_empty() {
+            return Err(SqlxError::Protocol(
+                "meeting_id cannot be empty".to_string(),
+            ));
+        }
+
+        let result =
+            sqlx::query("UPDATE meetings SET folder_path = ?, updated_at = ? WHERE id = ?")
+                .bind(folder_path)
+                .bind(Utc::now().naive_utc())
+                .bind(meeting_id)
+                .execute(pool)
+                .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn update_meeting_title(
         pool: &SqlitePool,
         meeting_id: &str,
@@ -271,4 +316,101 @@ async fn delete_meeting_with_transaction(
         .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    /// In-memory database with the real migrations applied.
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        pool
+    }
+
+    async fn insert_meeting(pool: &SqlitePool, id: &str, folder_path: Option<&str>) {
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind("Standup")
+        .bind(now)
+        .bind(now)
+        .bind(folder_path)
+        .execute(pool)
+        .await
+        .expect("insert meeting");
+    }
+
+    #[tokio::test]
+    async fn folder_path_round_trips_through_the_database() {
+        let pool = test_pool().await;
+        insert_meeting(&pool, "m1", Some("/recordings/Standup_2026-07-28_10-30")).await;
+
+        let stored = MeetingsRepository::get_meeting_folder_path(&pool, "m1")
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.as_deref(),
+            Some("/recordings/Standup_2026-07-28_10-30")
+        );
+
+        let updated =
+            MeetingsRepository::update_meeting_folder_path(&pool, "m1", "/recordings/Weekly Sync")
+                .await
+                .unwrap();
+        assert!(updated);
+
+        let stored = MeetingsRepository::get_meeting_folder_path(&pool, "m1")
+            .await
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("/recordings/Weekly Sync"));
+    }
+
+    #[tokio::test]
+    async fn folder_path_is_none_for_meetings_without_a_recording() {
+        let pool = test_pool().await;
+        insert_meeting(&pool, "m2", None).await;
+
+        let stored = MeetingsRepository::get_meeting_folder_path(&pool, "m2")
+            .await
+            .unwrap();
+        assert_eq!(stored, None);
+    }
+
+    #[tokio::test]
+    async fn updating_an_unknown_meeting_reports_no_rows() {
+        let pool = test_pool().await;
+
+        let updated =
+            MeetingsRepository::update_meeting_folder_path(&pool, "missing", "/recordings/X")
+                .await
+                .unwrap();
+
+        assert!(!updated, "renaming a nonexistent meeting must not report success");
+    }
+
+    #[tokio::test]
+    async fn empty_meeting_id_is_rejected() {
+        let pool = test_pool().await;
+
+        assert!(MeetingsRepository::get_meeting_folder_path(&pool, "  ")
+            .await
+            .is_err());
+        assert!(
+            MeetingsRepository::update_meeting_folder_path(&pool, "", "/recordings/X")
+                .await
+                .is_err()
+        );
+    }
 }

@@ -10,8 +10,20 @@ export interface RecordingPreferences {
   save_folder: string;
   auto_save: boolean;
   file_format: string;
+  folder_prefix: string | null;
   preferred_mic_device: string | null;
   preferred_system_device: string | null;
+}
+
+/**
+ * Preview of the folder name a recording would get, mirroring the Rust naming
+ * rules in src-tauri/src/audio/meeting_folder.rs: `<prefix><Name>_<timestamp>`,
+ * with the prefix applied verbatim so the user owns the separator.
+ */
+export function previewFolderName(prefix: string | null, meetingName = 'Team Standup'): string {
+  const illegal = /[/\\:*?"<>|\x00-\x1f]/g;
+  const clean = (value: string) => value.replace(illegal, '_').trim().replace(/[. ]+$/, '').trim();
+  return `${clean(prefix ?? '')}${clean(meetingName)}_2026-07-28_10-30`;
 }
 
 interface RecordingSettingsProps {
@@ -23,12 +35,15 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     save_folder: '',
     auto_save: true,
     file_format: 'mp4',
+    folder_prefix: null,
     preferred_mic_device: null,
     preferred_system_device: null
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showRecordingNotification, setShowRecordingNotification] = useState(true);
+  // Kept separate from `preferences` so typing stays responsive; committed on blur.
+  const [folderPrefixDraft, setFolderPrefixDraft] = useState('');
 
   // Load recording preferences on component mount
   useEffect(() => {
@@ -36,6 +51,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       try {
         const prefs = await invoke<RecordingPreferences>('get_recording_preferences');
         setPreferences(prefs);
+        setFolderPrefixDraft(prefs.folder_prefix ?? '');
       } catch (error) {
         console.error('Failed to load recording preferences:', error);
         // If loading fails, get default folder path
@@ -94,6 +110,34 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       has_preferred_microphone: (!!devices.micDevice).toString(),
       has_preferred_system_audio: (!!devices.systemDevice).toString()
     });
+  };
+
+  const handleFolderPrefixCommit = async () => {
+    const trimmed = folderPrefixDraft.trim();
+    const nextPrefix = trimmed === '' ? null : trimmed;
+
+    // Nothing to persist when the value is unchanged (e.g. blur without editing).
+    if (nextPrefix === (preferences.folder_prefix ?? null)) return;
+
+    const newPreferences = { ...preferences, folder_prefix: nextPrefix };
+    setPreferences(newPreferences);
+    setFolderPrefixDraft(trimmed);
+
+    try {
+      await invoke('set_recording_preferences', { preferences: newPreferences });
+      onSave?.(newPreferences);
+      toast.success(
+        nextPrefix ? `Folder prefix set to "${nextPrefix}"` : 'Folder prefix removed'
+      );
+      await Analytics.track('recording_folder_prefix_changed', {
+        has_prefix: (!!nextPrefix).toString()
+      });
+    } catch (error) {
+      console.error('Failed to save folder prefix:', error);
+      toast.error('Failed to save folder prefix', {
+        description: error instanceof Error ? error.message : String(error)
+      });
+    }
   };
 
   const handleOpenFolder = async () => {
@@ -198,11 +242,49 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
               <strong>File Format:</strong> {preferences.file_format.toUpperCase()} files
             </div>
             <div className="text-xs text-blue-600 dark:text-blue-400 mt-1">
-              Recordings are saved with timestamp: recording_YYYYMMDD_HHMMSS.{preferences.file_format}
+              Each meeting gets its own folder containing audio.{preferences.file_format}, the
+              transcript, and metadata.
             </div>
           </div>
         </div>
       )}
+
+      {/* Folder Naming — meeting folders are created for transcripts even when
+          audio auto-save is off, so this applies regardless of that toggle. */}
+      <div className="p-4 border rounded-lg space-y-3">
+        <div>
+          <label htmlFor="folder-prefix" className="block font-medium">
+            Folder Name Prefix
+          </label>
+          <div className="text-sm text-muted-foreground mt-1">
+            Added to the start of every new meeting folder. Include your own separator,
+            e.g. <code className="text-xs">Work_</code> or <code className="text-xs">[Client] </code>.
+          </div>
+        </div>
+        <input
+          id="folder-prefix"
+          type="text"
+          value={folderPrefixDraft}
+          onChange={(e) => setFolderPrefixDraft(e.target.value)}
+          onBlur={handleFolderPrefixCommit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') e.currentTarget.blur();
+            if (e.key === 'Escape') {
+              setFolderPrefixDraft(preferences.folder_prefix ?? '');
+              e.currentTarget.blur();
+            }
+          }}
+          disabled={saving}
+          placeholder="No prefix"
+          className="w-full px-3 py-2 text-sm border border-input rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
+        />
+        <div className="text-xs text-muted-foreground">
+          New folders look like{' '}
+          <code className="px-1.5 py-0.5 rounded bg-muted text-foreground break-all">
+            {previewFolderName(folderPrefixDraft)}
+          </code>
+        </div>
+      </div>
 
       {/* Info when auto_save is disabled */}
       {!preferences.auto_save && (

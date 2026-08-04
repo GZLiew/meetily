@@ -45,6 +45,9 @@ pub(crate) mod common;
 // Shared constants
 pub mod constants;
 
+// Meeting recording folder naming, creation, and renaming
+pub mod meeting_folder;
+
 // Retranscription module (re-process stored audio with different settings)
 pub mod retranscription;
 

@@ -21,6 +21,7 @@ use super::{
     DeviceEvent,
     DeviceMonitorType
 };
+use super::meeting_folder::MeetingFolderConfig;
 
 // Import transcription modules
 use super::transcription::{
@@ -112,17 +113,22 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Create new recording manager
     let mut manager = RecordingManager::new();
 
-    // Load recording preferences to get auto_save AND device preferences
-    let (auto_save, preferred_mic_name, preferred_system_name) =
+    // Load recording preferences to get auto_save, folder naming AND device preferences
+    let (auto_save, folder_config, preferred_mic_name, preferred_system_name) =
         match super::recording_preferences::load_recording_preferences(&app).await {
             Ok(prefs) => {
-                info!("📋 Loaded recording preferences: auto_save={}, preferred_mic={:?}, preferred_system={:?}",
-                      prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device);
-                (prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device)
+                info!("📋 Loaded recording preferences: auto_save={}, folder_prefix={:?}, preferred_mic={:?}, preferred_system={:?}",
+                      prefs.auto_save, prefs.folder_prefix, prefs.preferred_mic_device, prefs.preferred_system_device);
+                (
+                    prefs.auto_save,
+                    MeetingFolderConfig::from_preferences(&prefs),
+                    prefs.preferred_mic_device,
+                    prefs.preferred_system_device,
+                )
             }
             Err(e) => {
                 warn!("Failed to load recording preferences, using defaults: {}", e);
-                (true, None, None)
+                (true, MeetingFolderConfig::default(), None, None)
             }
         };
 
@@ -234,7 +240,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
     let transcription_receiver = manager
-        .start_recording(microphone_device, system_device, auto_save)
+        .start_recording(microphone_device, system_device, auto_save, folder_config)
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
 
@@ -375,17 +381,22 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Create new recording manager
     let mut manager = RecordingManager::new();
 
-    // Load recording preferences to check auto_save setting
-    let auto_save = match super::recording_preferences::load_recording_preferences(&app).await {
-        Ok(prefs) => {
-            info!("📋 Loaded recording preferences: auto_save={}", prefs.auto_save);
-            prefs.auto_save
-        }
-        Err(e) => {
-            warn!("Failed to load recording preferences, defaulting to auto_save=true: {}", e);
-            true // Default to saving if preferences can't be loaded
-        }
-    };
+    // Load recording preferences to check auto_save and folder naming settings
+    let (auto_save, folder_config) =
+        match super::recording_preferences::load_recording_preferences(&app).await {
+            Ok(prefs) => {
+                info!(
+                    "📋 Loaded recording preferences: auto_save={}, folder_prefix={:?}",
+                    prefs.auto_save, prefs.folder_prefix
+                );
+                (prefs.auto_save, MeetingFolderConfig::from_preferences(&prefs))
+            }
+            Err(e) => {
+                warn!("Failed to load recording preferences, defaulting to auto_save=true: {}", e);
+                // Default to saving if preferences can't be loaded
+                (true, MeetingFolderConfig::default())
+            }
+        };
 
     // Always ensure a meeting name is set so incremental saver initializes
     let effective_meeting_name = meeting_name.clone().unwrap_or_else(|| {
@@ -405,7 +416,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // Start recording with specified devices and auto_save setting
     let transcription_receiver = manager
-        .start_recording(mic_device, system_device, auto_save)
+        .start_recording(mic_device, system_device, auto_save, folder_config)
         .await
         .map_err(|e| format!("Failed to start recording: {}", e))?;
 
